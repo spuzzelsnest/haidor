@@ -13,6 +13,7 @@ Config: environment variables, or a .env file next to this script:
     ANALYST_MODEL=deepseek-r1:7b
     HA_URL=http://gatekeeper.local
     HA_TOKEN=<long-lived access token>
+    THINK=false                           # true/false: model reasoning on or off
     HA_BLOCKED=shell_command,hassio,...   # optional, see below
     OBSIDIAN_VAULT=/home/jack/vault       # optional: enables the memory agent
     MEMORY_DIR="Agent Memory"             # the only folder the agent may write to
@@ -57,6 +58,8 @@ HA_TOKEN = os.environ.get("HA_TOKEN", "")
 ORCHESTRATOR_MODEL = os.environ.get("ORCHESTRATOR_MODEL", "qwen3:4b")
 ANALYST_MODEL = os.environ.get("ANALYST_MODEL", "deepseek-r1:7b")
 MAX_TURNS = int(os.environ.get("MAX_TURNS", "8"))
+# Let models reason before answering (slower, often smarter). true/1/yes/on
+THINK = os.environ.get("THINK", "false").strip().lower() in {"1", "true", "yes", "on"}
 VAULT = os.path.expanduser(os.environ.get("OBSIDIAN_VAULT", ""))
 MEMORY_DIR = os.environ.get("MEMORY_DIR", "Agent Memory").strip("/")
 MEMORY_ENABLED = bool(VAULT) and os.path.isdir(VAULT)
@@ -113,7 +116,7 @@ def ollama_chat(model, messages, tools=None, retries=2):
     payload = {"model": model, "messages": messages, "stream": False,
                "keep_alive": "30m"}
     if model not in _NO_THINK:
-        payload["think"] = False      # skip reasoning traces for speed
+        payload["think"] = THINK      # THINK env var; False = faster
     if tools:
         payload["tools"] = tools
 
@@ -673,7 +676,8 @@ def main():
           % (ORCHESTRATOR_MODEL, ANALYST_MODEL))
     print("Home Assistant: %s  memory: %s"
           % (HA_URL, VAULT if MEMORY_ENABLED else "off (set OBSIDIAN_VAULT)"))
-    print("(type your request, Ctrl-D to quit)\n")
+    print("thinking: %s  (type your request, Ctrl-D to quit)\n"
+          % ("on" if THINK else "off"))
     history = []
     while True:
         try:
