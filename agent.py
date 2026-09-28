@@ -73,14 +73,27 @@ def http_json(url, method="GET", body=None, token=None, timeout=90):
     except Exception as e:
         return {"error": str(e)[:300]}
 
-def ollama_chat(model, messages, tools=None):
-    payload = {"model": model, "messages": messages, "stream": False}
+def ollama_chat(model, messages, tools=None, think=False, retries=2):
+    payload = {"model": model, "messages": messages, "stream": False,
+               "think": think}
     if tools:
         payload["tools"] = tools
-    out = http_json(OLLAMA_URL + "/api/chat", "POST", payload)
-    if isinstance(out, dict) and "error" in out:
-        raise RuntimeError(str(out["error"]))
-    return out.get("message", {}) if isinstance(out, dict) else {}
+    last_err = None
+    for attempt in range(retries):
+        out = http_json(OLLAMA_URL + "/api/chat", "POST", payload, timeout=600)
+        if isinstance(out, dict) and "error" in out:
+            err = str(out["error"])
+            # some models (e.g. deepseek-r1) reject think=false -> retry without it
+            if "think" in err.lower() and "think" in payload:
+                payload.pop("think", None)
+                continue
+            last_err = err
+            if "timed out" in err.lower():
+                print("  (ollama slow, retrying %d/%d...)" % (attempt + 1, retries),
+                      file=sys.stderr)
+                continue
+        return out.get("message", {}) if isinstance(out, dict) else {}
+    raise RuntimeError(last_err or "ollama chat failed")
 
 # Strip <think>...</think> blocks (qwen3 / deepseek-r1 reasoning traces)
 THINK_RE = re.compile(r"<think>.*?</think>", re.S)
