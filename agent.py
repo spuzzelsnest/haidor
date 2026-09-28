@@ -56,6 +56,18 @@ if not HA_TOKEN:
     print("WARNING: HA_TOKEN is not set - Home Assistant calls will fail.",
           file=sys.stderr)
 
+# Event hook for UIs (e.g. server.py): set agent.EVENT_SINK = my_callback
+EVENT_SINK = None
+
+def emit(text):
+    """Print a trace event, and forward it to the UI sink if one is set."""
+    print(text)
+    if EVENT_SINK:
+        try:
+            EVENT_SINK(text)
+        except Exception:
+            pass
+
 # ----------------------------------------------------------------- http ---
 
 def http_json(url, method="GET", body=None, token=None, timeout=90):
@@ -75,7 +87,7 @@ def http_json(url, method="GET", body=None, token=None, timeout=90):
 
 def ollama_chat(model, messages, tools=None, think=False, retries=2):
     payload = {"model": model, "messages": messages, "stream": False,
-               "think": think}
+               "think": think, "keep_alive": "30m"}
     if tools:
         payload["tools"] = tools
     last_err = None
@@ -89,8 +101,7 @@ def ollama_chat(model, messages, tools=None, think=False, retries=2):
                 continue
             last_err = err
             if "timed out" in err.lower():
-                print("  (ollama slow, retrying %d/%d...)" % (attempt + 1, retries),
-                      file=sys.stderr)
+                emit("  (ollama slow, retrying %d/%d...)" % (attempt + 1, retries))
                 continue
         return out.get("message", {}) if isinstance(out, dict) else {}
     raise RuntimeError(last_err or "ollama chat failed")
@@ -324,12 +335,12 @@ def delegate(agent, task):
     if not a:
         return {"error": "unknown agent '%s' (use: %s)"
                 % (agent, ", ".join(SUBAGENTS))}
-    print("  -> delegating to %s: %s" % (agent, task[:70]))
+    emit("  -> delegating to %s: %s" % (agent, task[:70]))
     answer, trace = run_agent(a["model"], a["system"], a["tools"],
                               a["handlers"], task)
     for name, args, _ in trace:
-        print("     [%s] %s %s" % (agent, name,
-                                  json.dumps(args, default=str)[:60]))
+        emit("     [%s] %s %s" % (agent, name,
+                                 json.dumps(args, default=str)[:60]))
     return {"agent": agent, "answer": answer[:4000]}
 
 DELEGATE_TOOL = [
