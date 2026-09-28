@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-agent</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>&#129302; pi-agent</h1>
+  <span class="sub" id="status">connecting...</span>
+</header>
+<div id="chat"></div>
+<div id="dock">
+  <div id="chips">
+    <button>What lights are on?</button>
+    <button>Turn everything off downstairs</button>
+    <button>How warm is the living room?</button>
+    <button>How is the Pi doing?</button>
+    <button>Energy usage summary</button>
+  </div>
+  <form id="form">
+    <input id="input" placeholder="Ask your home anything..." autocomplete="off">
+    <button id="send">Send</button>
+  </form>
+</div>
+<script src="/static/app.js" defer></script>
+</body>
+</html>

@@ -5,8 +5,13 @@ pi-agent web - a small web front end for the pi-agent orchestrator.
 Serves a chat UI on http://<pi-ip>:8080. Agent trace events (delegations,
 tool calls) are streamed to the browser live while the agent works.
 
-Requirements: server.py sits in the SAME folder as agent.py. Both are
-stdlib-only, no pip installs needed.
+Layout (server.py, agent.py and static/ live in the same folder):
+    static/index.html   page structure
+    static/style.css    styling
+    static/app.js       browser logic
+    static/bg.jpg       background image
+Edit anything in static/ and just refresh the browser - no restart needed.
+Everything is stdlib-only, no pip installs needed.
 
 Usage:
     python3 server.py                     # then open http://<pi-ip>:8080
@@ -20,11 +25,12 @@ Config comes from the same .env file agent.py uses.
 import base64
 import hmac
 import json
+import mimetypes
 import os
 import queue
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import agent as pi_agent  # loads .env itself
 
@@ -37,174 +43,6 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 HISTORY = []                    # shared conversation memory (last few exchanges)
 AGENT_LOCK = threading.Lock()   # one agent run at a time
 
-HTML = r"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pi-agent</title>
-<style>
-  :root { --bg:#0f1117; --panel:#171a23; --line:#262a38; --text:#e6e8ef;
-          --dim:#8b91a5; --accent:#7aa2f7; --user:#2b3a5e; }
-  * { box-sizing:border-box; margin:0; padding:0; }
-  html, body { height:100%; }
-  body::before { content:''; position:fixed; inset:0;
-         background:rgba(15,17,23,.75); z-index:-1; }
-  body { background: var(--bg) url('/static/bg.jpg') center/cover no-repeat fixed;
-         color:var(--text); height:100dvh;
-         font:15px/1.5 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-         display:flex; flex-direction:column; }
-  header { padding:14px 20px; border-bottom:1px solid var(--line);
-           display:flex; align-items:baseline; gap:12px; }
-  header h1 { font-size:17px; font-weight:600; }
-  header .sub { color:var(--dim); font-size:12px; }
-  #chat { flex:1; min-height:0; overflow-y:auto; padding:20px; display:flex;
-          flex-direction:column; gap:14px; max-width:820px; width:100%;
-          margin:0 auto; }
-  .msg { display:flex; }
-  .msg.user { justify-content:flex-end; }
-  .bubble { max-width:75%; padding:10px 14px; border-radius:12px;
-            white-space:pre-wrap; word-wrap:break-word; }
-  .msg.user .bubble { background:var(--user); border-bottom-right-radius:4px; }
-  .msg.agent .bubble { background:var(--panel); border:1px solid var(--line);
-                       border-bottom-left-radius:4px; min-width:120px; }
-  .answer:empty { display:none; }
-  .trace { font:12px/1.6 ui-monospace,Menlo,Consolas,monospace; color:var(--dim);
-           margin-top:8px; padding-left:10px; border-left:2px solid var(--line); }
-  .trace:empty { display:none; }
-  .trace div { animation:fade .3s; }
-  @keyframes fade { from{opacity:0} to{opacity:1} }
-  .thinking { color:var(--accent); font-size:13px; margin-top:8px; }
-  #dock { border-top:1px solid var(--line); padding:14px 20px 20px;
-          max-width:820px; width:100%; margin:0 auto; }
-  #chips { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
-  #chips button { background:none; border:1px solid var(--line); color:var(--dim);
-          border-radius:999px; padding:4px 12px; font-size:12px; cursor:pointer; }
-  #chips button:hover { color:var(--text); border-color:var(--accent); }
-  #form { display:flex; gap:10px; }
-  #input { flex:1; background:var(--panel); border:1px solid var(--line);
-           color:var(--text); border-radius:10px; padding:11px 14px;
-           font-size:15px; outline:none; }
-  #input:focus { border-color:var(--accent); }
-  #send { background:var(--accent); border:none; color:#0f1117; font-weight:600;
-          border-radius:10px; padding:0 18px; cursor:pointer; font-size:15px; }
-  #send:disabled { opacity:.4; cursor:default; }
-</style>
-</head>
-<body>
-<header>
-  <h1>&#129302; pi-agent</h1>
-  <span class="sub" id="status">connecting...</span>
-</header>
-<div id="chat"></div>
-<div id="dock">
-  <div id="chips">
-    <button>What lights are on?</button>
-    <button>Turn everything off downstairs</button>
-    <button>How warm is the living room?</button>
-    <button>How is the Pi doing?</button>
-    <button>Energy usage summary</button>
-  </div>
-  <form id="form">
-    <input id="input" placeholder="Ask your home anything..." autocomplete="off">
-    <button id="send">Send</button>
-  </form>
-</div>
-<script>
-const chat = document.getElementById('chat');
-const input = document.getElementById('input');
-const sendBtn = document.getElementById('send');
-const statusEl = document.getElementById('status');
-let busy = false;
-
-fetch('/api/status').then(r => r.json()).then(s => {
-  statusEl.textContent = s.orchestrator + ' \u2192 ' + s.ha;
-}).catch(() => { statusEl.textContent = 'offline'; });
-
-const scrollDown = () => { chat.scrollTop = chat.scrollHeight; };
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text) e.textContent = text;
-  return e;
-}
-
-function addUser(text) {
-  const m = el('div', 'msg user');
-  m.appendChild(el('div', 'bubble', text));
-  chat.appendChild(m); scrollDown();
-}
-
-// An agent bubble has three parts: answer text, live trace, thinking timer.
-function addAgent() {
-  const m = el('div', 'msg agent'), bubble = el('div', 'bubble');
-  const parts = { answer: el('div', 'answer'), trace: el('div', 'trace'),
-                  think: el('div', 'thinking', 'thinking... 0s') };
-  bubble.append(parts.answer, parts.trace, parts.think);
-  m.appendChild(bubble); chat.appendChild(m); scrollDown();
-  return parts;
-}
-
-async function ask(text) {
-  text = text.trim();
-  if (busy || !text) return;
-  busy = true; sendBtn.disabled = true;
-  addUser(text);
-  const ui = addAgent();
-  let secs = 0, gotAnswer = false;
-  const timer = setInterval(() => {
-    ui.think.textContent = 'thinking... ' + (++secs) + 's';
-  }, 1000);
-
-  try {
-    const res = await fetch('/api/chat', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text})
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, {stream: true});
-      let i;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-        if (!line) continue;
-        const ev = JSON.parse(line);
-        if (ev.type === 'trace') {
-          ui.trace.appendChild(el('div', '', ev.text.replace(/^\s+/, '')));
-        } else if (ev.type === 'answer') {
-          ui.answer.textContent = ev.text || '(empty answer)'; gotAnswer = true;
-        } else if (ev.type === 'error') {
-          ui.answer.textContent = '\u26a0 ' + ev.text; gotAnswer = true;
-        }
-        scrollDown();
-      }
-    }
-    if (!gotAnswer) ui.answer.textContent = '(no response)';
-  } catch (e) {
-    ui.answer.textContent = '\u26a0 request failed: ' + e.message;
-  } finally {
-    clearInterval(timer); ui.think.remove();
-    busy = false; sendBtn.disabled = false; input.focus(); scrollDown();
-  }
-}
-
-document.getElementById('form').addEventListener('submit', e => {
-  e.preventDefault(); const t = input.value; input.value = ''; ask(t);
-});
-document.querySelectorAll('#chips button').forEach(b =>
-  b.addEventListener('click', () => ask(b.textContent)));
-input.focus();
-</script>
-</body>
-</html>
-"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -244,25 +82,40 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ GET ---
 
+    def _serve_static(self, rel):
+        """Serve a file from STATIC_DIR (never anything outside it)."""
+        root = os.path.realpath(STATIC_DIR)
+        try:
+            full = os.path.realpath(os.path.join(root, rel))
+            inside = os.path.commonpath([full, root]) == root
+            ok = inside and os.path.isfile(full)
+        except ValueError:
+            ok = False
+        if not ok:
+            self._json({"error": "not found"}, 404)
+            return
+        ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        if ctype.startswith("text/") or ctype.endswith("javascript"):
+            ctype += "; charset=utf-8"
+        with open(full, "rb") as f:
+            data = f.read()
+        # code files are never cached, so edits show up on a plain refresh
+        cache = ("no-cache" if full.endswith((".html", ".css", ".js"))
+                 else "max-age=86400")
+        self._send(200, data, ctype, {"Cache-Control": cache})
+
     def do_GET(self):
         if not self._authorized():
             return
         path = urlparse(self.path).path
         if path == "/":
-            self._send(200, HTML.encode(), "text/html; charset=utf-8")
+            self._serve_static("index.html")
+        elif path.startswith("/static/"):
+            self._serve_static(unquote(path[len("/static/"):]))
         elif path == "/api/status":
             self._json({"orchestrator": pi_agent.ORCHESTRATOR_MODEL,
                         "analyst": pi_agent.ANALYST_MODEL,
                         "ha": pi_agent.HA_URL})
-        elif path == "/static/bg.jpg":
-            try:
-                with open(os.path.join(STATIC_DIR, "bg.jpg"), "rb") as f:
-                    data = f.read()
-            except OSError:
-                self._json({"error": "not found"}, 404)
-                return
-            self._send(200, data, "image/jpeg",
-                       {"Cache-Control": "max-age=86400"})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -344,6 +197,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    if not os.path.isfile(os.path.join(STATIC_DIR, "index.html")):
+        raise SystemExit("static/index.html not found in %s" % STATIC_DIR)
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print("pi-agent web listening on http://%s:%d" % (HOST, PORT))
     if not WEB_PASSWORD and HOST != "127.0.0.1":
